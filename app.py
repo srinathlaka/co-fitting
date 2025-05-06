@@ -164,11 +164,63 @@ def main():
                 st.error(f"Error plotting group averages: {str(e)}")
 
         model_type = st.selectbox("Select Growth Model", ["Logistic", "Exponential", "Linear", "Baranyi", "Drug_Effect"])
+        
+        # Display the equation for the selected model in LaTeX
+        eq_col1, eq_col2 = st.columns([1, 3])
+        with eq_col1:
+            st.markdown("### Model Equation:")
+        with eq_col2:
+            if model_type == "Logistic":
+                st.latex(r"X(t) = \frac{K}{1 + \left(\frac{K - X_0}{X_0}\right) e^{-(\mu_0 - \mu_1 B)t}}")
+            elif model_type == "Exponential":
+                st.latex(r"X(t) = X_0 \cdot e^{(\mu_0 - \mu_1 B)t}")
+            elif model_type == "Linear":
+                st.latex(r"X(t) = X_0 \cdot e^{\mu_0 - \mu_1 B} \cdot t")
+            elif model_type == "Baranyi":
+                st.latex(r"X(t) = X_0 + (\mu_0 - \mu_1 B) \cdot A(t) - \ln\left(1 + \frac{e^{(\mu_0 - \mu_1 B) \cdot A(t)} - 1}{e^{K - X_0}}\right)")
+                st.latex(r"A(t) = t + \frac{1}{\mu} \ln\left(e^{-\mu t} + e^{-h_0} - e^{-\mu t - h_0}\right)")
+            elif model_type == "Drug_Effect":
+                st.latex(r"X(t) = X_0 \cdot e^{\mu_0 t} \cdot e^{-K_1 B t} \cdot e^{-K_2 B^2 t}")
+        
+        # Get default parameters
         param_names, default_vals = get_default_params(model_type)
+
+        # Add this before setting up the parameter inputs
+        # Generate better initial estimates based on the data
+        estimated_defaults = []
+        
+        if y_data_list:
+            # For all models, estimate X0 from the data
+            X0_est = np.mean([data[0] for data in y_data_list])
+            
+            if model_type == "Exponential":
+                # Estimate growth rate from first and last points
+                time_range = time[-1] - time[0]
+                growth_rates = []
+                for data in y_data_list:
+                    if data[-1] > data[0] and data[0] > 0:  # Only use positive growth
+                        rate = np.log(data[-1]/data[0]) / time_range
+                        growth_rates.append(rate)
+                
+                mu0_est = np.mean(growth_rates) if growth_rates else 0.3
+                estimated_defaults = [X0_est, mu0_est, 0.1]
+            
+            elif model_type == "Logistic":
+                # Estimate K from max values
+                K_est = np.max([np.max(data) for data in y_data_list]) * 1.1
+                estimated_defaults = [X0_est, 0.3, 0.1, K_est]
+        
+        # If we have estimated values, use them; otherwise use defaults
+        if estimated_defaults and all(v > 0 for v in estimated_defaults):
+            default_vals = estimated_defaults
+
+        # REMOVED: B_scale slider
         B_input = st.text_input("Enter B values (comma-separated)", value=", ".join([str(i * 0.1) for i in range(1, num_groups + 1)]))
         try:
+            # Use B values directly without scaling
             B_values = [float(b.strip()) for b in B_input.split(",")]
         except:
+            # Default values without scaling
             B_values = [0.1] * num_groups
 
         st.subheader("Initial Parameters")
@@ -181,7 +233,23 @@ def main():
 
         if st.button("🚀 Run Co-Fitting"):
             try:
-                result = least_squares(residuals, param_inputs, args=(time, y_data_list, B_values, model_type))
+                # Add constraints to prevent negative or near-zero parameter values
+                param_bounds = ([1e-3] * len(param_inputs), [np.inf] * len(param_inputs))
+                
+                # Use a better optimization strategy
+                result = least_squares(
+                    residuals, 
+                    param_inputs, 
+                    args=(time, y_data_list, B_values, model_type),
+                    bounds=param_bounds,
+                    method='trf',  # Trust Region Reflective - handles bounds well
+                    ftol=1e-8,     # Tighter function tolerance
+                    xtol=1e-8,     # Tighter parameter tolerance
+                    gtol=1e-8,     # Tighter gradient tolerance
+                    max_nfev=1000, # More iterations
+                    verbose=1      # Print progress
+                )
+                
                 if result.success:
                     st.success("Fitting successful!")
                     for name, val in zip(param_names, result.x):
@@ -190,6 +258,23 @@ def main():
                     st.plotly_chart(plot_fits(time, y_data_list, result.x, B_values, model_type))
                 else:
                     st.error("Fitting failed. Adjust initial parameters.")
+                
+                # Add diagnostic information
+                st.subheader("Fitting Diagnostics")
+                st.write(f"**Optimization Status:** {result.status}")
+                st.write(f"**Function Evaluations:** {result.nfev}")
+                st.write(f"**Optimality (lower is better):** {result.optimality:.6f}")
+                
+                # Plot residuals
+                residual_fig = go.Figure()
+                residual_array = np.array(result.fun).reshape(len(y_data_list), -1)
+                for i, res in enumerate(residual_array):
+                    residual_fig.add_trace(go.Scatter(
+                        x=time, y=res, mode='lines+markers', 
+                        name=f'Group {i+1} Residuals'
+                    ))
+                residual_fig.update_layout(title='Fitting Residuals', xaxis_title='Time', yaxis_title='Residual')
+                st.plotly_chart(residual_fig)
             except Exception as e:
                 st.error(f"Error: {e}")
 
