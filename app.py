@@ -6,6 +6,7 @@ from models.fitting import residuals
 from utils.layout import generate_labels, create_stable_button_layout
 from utils.plotting import plot_fits
 from config.defaults import get_default_params
+import plotly.graph_objects as go
 
 
 def main():
@@ -214,6 +215,58 @@ def main():
         if estimated_defaults and all(v > 0 for v in estimated_defaults):
             default_vals = estimated_defaults
 
+        # After selecting the model and before B values input, add time range selection
+        st.subheader("⏱️ Time Range Selection")
+        
+        # Get min and max time values from the data
+        min_time = float(time[0])
+        max_time = float(time[-1])
+        
+        # Create two columns for side-by-side time range inputs
+        time_col1, time_col2 = st.columns(2)
+        
+        with time_col1:
+            start_time = st.number_input(
+                "Start Time", 
+                min_value=min_time,
+                max_value=max_time, 
+                value=min_time,
+                step=0.1,
+                format="%.1f"
+            )
+        
+        with time_col2:
+            end_time = st.number_input(
+                "End Time", 
+                min_value=min_time,
+                max_value=max_time, 
+                value=max_time,
+                step=0.1,
+                format="%.1f"
+            )
+        
+        # Add a visual indicator of selected range
+        time_range_fig = go.Figure()
+        time_range_fig.add_trace(go.Scatter(
+            x=time, 
+            y=[np.mean(data) for data in zip(*y_data_list)],
+            mode='lines',
+            name='Average of all groups'
+        ))
+        
+        # Add vertical lines indicating selected range
+        time_range_fig.add_vline(x=start_time, line_width=2, line_dash="dash", line_color="green")
+        time_range_fig.add_vline(x=end_time, line_width=2, line_dash="dash", line_color="red")
+        
+        time_range_fig.update_layout(
+            title="Selected Time Range for Fitting",
+            xaxis_title="Time",
+            yaxis_title="Average OD",
+            height=300
+        )
+        
+        st.plotly_chart(time_range_fig)
+
         # REMOVED: B_scale slider
         B_input = st.text_input("Enter B values (comma-separated)", value=", ".join([str(i * 0.1) for i in range(1, num_groups + 1)]))
         try:
@@ -233,31 +286,55 @@ def main():
 
         if st.button("🚀 Run Co-Fitting"):
             try:
+                # Filter time and data based on selected range
+                time_mask = (time >= start_time) & (time <= end_time)
+                filtered_time = time[time_mask]
+                filtered_y_data_list = [y_data[time_mask] for y_data in y_data_list]
+                
                 # Add constraints to prevent negative or near-zero parameter values
                 param_bounds = ([1e-3] * len(param_inputs), [np.inf] * len(param_inputs))
                 
-                # Use a better optimization strategy
+                # Use FILTERED data for fitting
                 result = least_squares(
                     residuals, 
                     param_inputs, 
-                    args=(time, y_data_list, B_values, model_type),
+                    args=(filtered_time, filtered_y_data_list, B_values, model_type),
                     bounds=param_bounds,
-                    method='trf',  # Trust Region Reflective - handles bounds well
-                    ftol=1e-8,     # Tighter function tolerance
-                    xtol=1e-8,     # Tighter parameter tolerance
-                    gtol=1e-8,     # Tighter gradient tolerance
-                    max_nfev=1000, # More iterations
-                    verbose=1      # Print progress
+                    method='trf',
+                    ftol=1e-8,
+                    xtol=1e-8,
+                    gtol=1e-8,
+                    max_nfev=1000,
+                    verbose=1
                 )
                 
                 if result.success:
                     st.success("Fitting successful!")
                     for name, val in zip(param_names, result.x):
                         st.write(f"**{name}**: {val:.5f}")
-                    st.subheader("Fitted Curves")
-                    st.plotly_chart(plot_fits(time, y_data_list, result.x, B_values, model_type))
-                else:
-                    st.error("Fitting failed. Adjust initial parameters.")
+                    
+                    # Create tabs for showing different views
+                    fit_tab1, fit_tab2 = st.tabs(["Fitted Time Range", "Full Time Range"])
+                    
+                    with fit_tab1:
+                        # Show only the filtered time range (what was actually fitted)
+                        st.subheader("Fitted Data (Selected Range Only)")
+                        fitted_range_fig = plot_fits(filtered_time, 
+                                                    [y_data[time_mask] for y_data in y_data_list], 
+                                                    result.x, 
+                                                    B_values, 
+                                                    model_type)
+                        st.plotly_chart(fitted_range_fig)
+                    
+                    with fit_tab2:
+                        # Show extrapolation over the entire dataset
+                        st.subheader("Model Prediction (Full Range)")
+                        full_range_fig = plot_fits(time, 
+                                                  y_data_list, 
+                                                  result.x, 
+                                                  B_values, 
+                                                  model_type)
+                        st.plotly_chart(full_range_fig)
                 
                 # Add diagnostic information
                 st.subheader("Fitting Diagnostics")
